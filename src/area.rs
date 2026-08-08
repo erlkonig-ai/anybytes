@@ -11,8 +11,8 @@
 //! The area offers staged writing through a [`SectionWriter`]. Each call to
 //! [`SectionWriter::reserve`] returns a mutable [`Section`] tied to the area's
 //! lifetime. Multiple sections may coexist; their byte ranges do not overlap.
-//! Freezing a section via [`Section::freeze`] remaps its range as immutable and
-//! returns [`Bytes`].
+//! Freezing a section via [`Section::freeze`] changes its range to immutable
+//! and returns [`Bytes`].
 //!
 //! # Examples
 //!
@@ -98,10 +98,14 @@ impl ByteArea {
 
     /// Persist the temporary area file to `path` and return the underlying [`std::fs::File`].
     ///
-    /// Persisting names the temporary file; it does not itself synchronize
-    /// outstanding mapped writes to durable storage. Call [`Section::flush`]
-    /// before freezing sections when that guarantee is required.
+    /// All mapped writes are synchronized once before the temporary file is
+    /// retained. The rename itself and its parent directory are not separately
+    /// synchronized, so this does not promise crash-atomic path publication.
+    ///
+    /// The persistence contract is supported on Unix targets. Other targets
+    /// are best-effort rather than part of AnyBytes' support surface.
     pub fn persist<P: AsRef<std::path::Path>>(self, path: P) -> io::Result<std::fs::File> {
+        self.file.as_file().sync_all()?;
         self.file.persist(path).map_err(Into::into)
     }
 }
@@ -178,23 +182,11 @@ where
         }
     }
 
-    /// Synchronize outstanding modifications to durable storage.
-    ///
-    /// This is not needed to make writes visible through this mapping or the
-    /// [`Bytes`] returned by [`Section::freeze`]. It is only a persistence
-    /// barrier for callers that need the backing file to survive a crash.
-    pub fn flush(&self) -> io::Result<()> {
-        if self.mmap.len() > 0 {
-            self.mmap.flush()?;
-        }
-        Ok(())
-    }
-
     /// Freeze the section and return immutable [`Bytes`].
     ///
     /// Freezing changes the mapping's memory protection without synchronizing
-    /// dirty pages to durable storage. Call [`Section::flush`] first when a
-    /// persistence barrier is required.
+    /// dirty pages to durable storage. [`ByteArea::persist`] owns that barrier
+    /// when the backing file is deliberately retained.
     pub fn freeze(self) -> io::Result<Bytes> {
         let len_bytes = self.elems * core::mem::size_of::<T>();
         let offset = self.offset;

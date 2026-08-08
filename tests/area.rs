@@ -138,7 +138,7 @@ fn frozen_section_outlives_temporary_area() {
 }
 
 #[test]
-fn persisted_area_observes_frozen_section_without_flush() {
+fn persisted_area_observes_frozen_section() {
     let directory = tempfile::tempdir().expect("temp directory");
     let path = directory.path().join("area.bin");
 
@@ -157,15 +157,4 @@ fn persisted_area_observes_frozen_section_without_flush() {
 
     drop(file);
     assert_eq!(bytes.as_ref(), &[5, 6, 7, 8]);
-}
-
-#[test]
-fn section_flush_is_an_explicit_persistence_barrier() {
-    let mut area = ByteArea::new().expect("area");
-    let mut sections = area.sections();
-    let mut section = sections.reserve::<u8>(4).expect("reserve");
-    section.copy_from_slice(&[9, 10, 11, 12]);
-    section.flush().expect("flush");
-
-    assert_eq!(section.freeze().expect("freeze").as_ref(), &[9, 10, 11, 12]);
 }

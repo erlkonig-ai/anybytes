@@ -2,8 +2,8 @@
 
 ## Unreleased
 - make `Section::freeze` a memory-protection transition rather than an
-  implicit durability barrier; add explicit `Section::flush` for callers that
-  need to synchronize mapped writes
+  implicit durability barrier; `ByteArea::persist` synchronizes the complete
+  backing file once when it is deliberately retained
 - **fix soundness**: changed `Bytes` and `View` internal data fields from
   `&'static [u8]`/`&'static T` to raw pointers (`*const [u8]`/`*const T`)
   to fix undefined behavior under both Stacked Borrows and Tree Borrows when
