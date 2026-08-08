@@ -97,6 +97,10 @@ impl ByteArea {
     }
 
     /// Persist the temporary area file to `path` and return the underlying [`std::fs::File`].
+    ///
+    /// Persisting names the temporary file; it does not itself synchronize
+    /// outstanding mapped writes to durable storage. Call [`Section::flush`]
+    /// before freezing sections when that guarantee is required.
     pub fn persist<P: AsRef<std::path::Path>>(self, path: P) -> io::Result<std::fs::File> {
         self.file.persist(path).map_err(Into::into)
     }
@@ -174,15 +178,30 @@ where
         }
     }
 
-    /// Freeze the section and return immutable [`Bytes`].
-    pub fn freeze(self) -> io::Result<Bytes> {
+    /// Synchronize outstanding modifications to durable storage.
+    ///
+    /// This is not needed to make writes visible through this mapping or the
+    /// [`Bytes`] returned by [`Section::freeze`]. It is only a persistence
+    /// barrier for callers that need the backing file to survive a crash.
+    pub fn flush(&self) -> io::Result<()> {
         if self.mmap.len() > 0 {
             self.mmap.flush()?;
         }
+        Ok(())
+    }
+
+    /// Freeze the section and return immutable [`Bytes`].
+    ///
+    /// Freezing changes the mapping's memory protection without synchronizing
+    /// dirty pages to durable storage. Call [`Section::flush`] first when a
+    /// persistence barrier is required.
+    pub fn freeze(self) -> io::Result<Bytes> {
         let len_bytes = self.elems * core::mem::size_of::<T>();
         let offset = self.offset;
         // Convert the writable mapping into a read-only view instead of
-        // unmapping and remapping the region.
+        // unmapping and remapping the region. The same mapping retains both
+        // its dirty pages and its backing object, so visibility and lifetime
+        // do not require a durability flush here.
         let map = self.mmap.make_read_only()?;
         Ok(Bytes::from_source(map).slice(offset..offset + len_bytes))
     }

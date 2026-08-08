@@ -123,3 +123,49 @@ fn handles_can_be_stored_in_sections() {
     let stored_handle = handle_handles.view(&all).expect("view handles").as_ref()[0];
     assert_eq!(stored_handle.view(&all).unwrap().as_ref(), &[3]);
 }
+
+#[test]
+fn frozen_section_outlives_temporary_area() {
+    let bytes = {
+        let mut area = ByteArea::new().expect("area");
+        let mut sections = area.sections();
+        let mut section = sections.reserve::<u8>(4).expect("reserve");
+        section.copy_from_slice(&[1, 2, 3, 4]);
+        section.freeze().expect("freeze")
+    };
+
+    assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
+}
+
+#[test]
+fn persisted_area_observes_frozen_section_without_flush() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let path = directory.path().join("area.bin");
+
+    let mut area = ByteArea::new().expect("area");
+    let mut sections = area.sections();
+    let mut section = sections.reserve::<u8>(4).expect("reserve");
+    section.copy_from_slice(&[5, 6, 7, 8]);
+    let bytes = section.freeze().expect("freeze");
+    drop(sections);
+
+    let file = area.persist(&path).expect("persist");
+    assert_eq!(
+        std::fs::read(&path).expect("read persisted area"),
+        bytes.as_ref()
+    );
+
+    drop(file);
+    assert_eq!(bytes.as_ref(), &[5, 6, 7, 8]);
+}
+
+#[test]
+fn section_flush_is_an_explicit_persistence_barrier() {
+    let mut area = ByteArea::new().expect("area");
+    let mut sections = area.sections();
+    let mut section = sections.reserve::<u8>(4).expect("reserve");
+    section.copy_from_slice(&[9, 10, 11, 12]);
+    section.flush().expect("flush");
+
+    assert_eq!(section.freeze().expect("freeze").as_ref(), &[9, 10, 11, 12]);
+}
