@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-anybytes = { path = ".." }
+anybytes = { path = "..", version = "0.20.3" }
 
 [dev-dependencies]
 arbitrary = { version = "1", features = ["derive"] }

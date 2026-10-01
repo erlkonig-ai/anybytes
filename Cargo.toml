@@ -1,6 +1,6 @@
 [package]
 name = "anybytes"
-version = "0.20.2"
+version = "0.20.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/triblespace/anybytes"

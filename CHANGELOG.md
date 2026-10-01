@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+
+## 0.20.3 - 2026-10-01
+
+- Release the byte-owner and area implementation pinned by the TribleSpace
+  cohort at `066c32a7cfcc470a6750c849499c1e88a0e0c50a`. This is a new registry
+  version, not a claim that the previously published 0.20.2 had those bytes.
+- No implementation change accompanies this release metadata update.
+
+## Earlier development
+
 - make `Section::freeze` a memory-protection transition rather than an
   implicit durability barrier; `ByteArea::persist` synchronizes the complete
   backing file once when it is deliberately retained
