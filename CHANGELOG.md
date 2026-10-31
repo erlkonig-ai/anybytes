@@ -12,6 +12,11 @@
   `reserve_allocated`. It borrows no area, so it can live in a long-lived
   structure, and freezes to `Bytes` like any section. `Section` is now `Send`
   and `Sync` when its element type is.
+- Refuse a section whose byte length or aligned end would overflow `usize`,
+  and an element type aligned more strictly than a page, with
+  `ErrorKind::InvalidInput`. This applies to `reserve`, `reserve_allocated`
+  and `Section::anonymous_allocated`; before, `reserve` could wrap the length
+  in release builds or hand out a misaligned slice for such a type.
 
 ## 0.20.3 - 2026-10-01
 

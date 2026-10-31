@@ -14,6 +14,12 @@
 //! Freezing a section via [`Section::freeze`] changes its range to immutable
 //! and returns [`Bytes`].
 //!
+//! [`SectionWriter::reserve`] grows the file sparsely; use
+//! [`SectionWriter::reserve_allocated`] when a full filesystem must be an
+//! [`io::Error`] from the reservation rather than a fault on a later write.
+//! [`Section::anonymous_allocated`] creates one owned section, with the same
+//! allocation guarantee, that borrows no area.
+//!
 //! # Examples
 //!
 //! ```

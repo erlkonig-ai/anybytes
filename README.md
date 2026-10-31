@@ -123,6 +123,16 @@ assert_eq!(handle.view(&all).unwrap().as_ref(), b"test".as_ref());
 
 Call `area.persist(path)` to keep the temporary file instead of mapping it.
 
+`reserve` grows the file sparsely: storage is claimed only when a section is
+first written, so on a full filesystem that write faults (SIGBUS) instead of
+returning an error. Use `reserve_allocated` where a full disk must surface as an
+`io::Error` from the reservation; it writes the range before mapping it. For a
+single long-lived section that should not borrow an area, for example a chunk
+of a cache that keeps growing, `Section::anonymous_allocated(elems)` creates an
+owned section in its own unnamed file with the same allocation guarantee; it
+freezes to `Bytes` like any section. All three refuse sizes that overflow and
+element types aligned more strictly than a page.
+
 The area only aligns allocations to the element type and may share pages
 between adjacent sections to minimize wasted space. Multiple sections may be
 active simultaneously; their byte ranges do not overlap.
