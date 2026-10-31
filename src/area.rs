@@ -161,39 +161,13 @@ impl<'area> SectionWriter<'area> {
         let offset = start - aligned_offset;
         let map_len = end - aligned_offset;
 
-        let file = &mut self.area.file;
-        if allocate {
-            // Write the new range so its blocks exist before it is mapped.
-            let old = self.area.len;
-            let written = (|| {
-                file.as_file_mut().seek(SeekFrom::Start(old as u64))?;
-                let zeros = [0u8; 64 * 1024];
-                let mut remaining = end - old;
-                while remaining > 0 {
-                    let chunk = remaining.min(zeros.len());
-                    file.as_file_mut().write_all(&zeros[..chunk])?;
-                    remaining -= chunk;
-                }
-                Ok::<(), io::Error>(())
-            })();
-            if let Err(error) = written {
-                // A partial write may have extended the file; cut it back so
-                // the area's length and the file agree again (best effort:
-                // the next reservation sets the length exactly anyway).
-                let _ = file.as_file_mut().set_len(old as u64);
-                return Err(error);
-            }
-        }
-        // Set the exact length on both paths, which also removes any tail a
-        // failed earlier reservation left beyond the area's length.
-        file.as_file_mut().set_len(end as u64)?;
-        // Ensure subsequent mappings see the extended size.
-        file.as_file_mut().seek(SeekFrom::Start(end as u64))?;
+        let file = self.area.file.as_file_mut();
+        extend(file, self.area.len, end, allocate)?;
         let mmap = unsafe {
             memmap2::MmapOptions::new()
                 .offset(aligned_offset as u64)
                 .len(map_len)
-                .map_mut(file.as_file())?
+                .map_mut(&*file)?
         };
 
         self.area.len = end;
@@ -206,6 +180,40 @@ impl<'area> SectionWriter<'area> {
             _marker: PhantomData,
         })
     }
+}
+
+/// Grow `file` from `old` to exactly `end` bytes, leaving its cursor at `end`.
+///
+/// With `allocate`, the new range is written with zeros first, so its blocks
+/// exist before anything maps it and a full filesystem is an [`io::Error`]
+/// here. Without it the file grows sparsely by `set_len`.
+fn extend(file: &mut std::fs::File, old: usize, end: usize, allocate: bool) -> io::Result<()> {
+    if allocate {
+        let written = (|| {
+            file.seek(SeekFrom::Start(old as u64))?;
+            let zeros = [0u8; 64 * 1024];
+            let mut remaining = end - old;
+            while remaining > 0 {
+                let chunk = remaining.min(zeros.len());
+                file.write_all(&zeros[..chunk])?;
+                remaining -= chunk;
+            }
+            Ok::<(), io::Error>(())
+        })();
+        if let Err(error) = written {
+            // A partial write may have extended the file; cut it back so
+            // the area's length and the file agree again (best effort:
+            // the next reservation sets the length exactly anyway).
+            let _ = file.set_len(old as u64);
+            return Err(error);
+        }
+    }
+    // Set the exact length on both paths, which also removes any tail a
+    // failed earlier reservation left beyond the area's length.
+    file.set_len(end as u64)?;
+    // Ensure subsequent mappings see the extended size.
+    file.seek(SeekFrom::Start(end as u64))?;
+    Ok(())
 }
 
 /// Mutable section reserved from a [`ByteArea`].
@@ -221,6 +229,46 @@ pub struct Section<'arena, T> {
     elems: usize,
     /// Marker tying the section to the area and element type.
     _marker: PhantomData<(&'arena ByteArea, *mut T)>,
+}
+
+// SAFETY: a section uniquely owns its writable mapping. The area appears
+// only in the lifetime marker (`*mut T` there keeps `T` invariant), so moving
+// or sharing a section is moving or sharing the `[T]` it holds.
+unsafe impl<T: Send> Send for Section<'_, T> {}
+unsafe impl<T: Sync> Sync for Section<'_, T> {}
+
+impl<T> Section<'static, T>
+where
+    T: FromBytes + Immutable,
+{
+    /// Create a section in its own anonymous temporary file, with its storage
+    /// claimed now.
+    ///
+    /// Like [`SectionWriter::reserve_allocated`], the range is written with
+    /// zeros before it is mapped, so a full filesystem is an [`io::Error`]
+    /// here rather than a fault on a later store. The file is unnamed from
+    /// the start where the platform allows (`O_TMPFILE` on Linux) and
+    /// unlinked immediately otherwise, and its descriptor is closed on
+    /// return, so a process that dies leaves no file behind and nothing else
+    /// can resize the mapping. The section borrows no area: it owns its
+    /// mapping and lives as long as it is kept. [`Section::freeze`] turns it
+    /// into [`Bytes`] as for any section, and its [`Section::handle`]
+    /// addresses those frozen bytes.
+    pub fn anonymous_allocated(elems: usize) -> io::Result<Self> {
+        let len = core::mem::size_of::<T>() * elems;
+        let mut file = tempfile::tempfile()?;
+        extend(&mut file, 0, len, true)?;
+        // SAFETY: the file has no name and this is its only descriptor,
+        // dropped on return, so no one else can write or truncate it.
+        let mmap = unsafe { memmap2::MmapOptions::new().len(len).map_mut(&file)? };
+        Ok(Section {
+            mmap,
+            offset: 0,
+            start: 0,
+            elems,
+            _marker: PhantomData,
+        })
+    }
 }
 
 impl<'arena, T> Section<'arena, T>

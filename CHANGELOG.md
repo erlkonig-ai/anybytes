@@ -7,6 +7,11 @@
   instead of a SIGBUS on a later store into a sparse hole. `reserve` keeps
   growing the file sparsely and is unchanged for incremental builders; its
   documentation now names that behaviour.
+- Add `Section::anonymous_allocated`, an owned section in its own unnamed
+  temporary file whose storage is claimed before mapping, like
+  `reserve_allocated`. It borrows no area, so it can live in a long-lived
+  structure, and freezes to `Bytes` like any section. `Section` is now `Send`
+  and `Sync` when its element type is.
 
 ## 0.20.3 - 2026-10-01
 

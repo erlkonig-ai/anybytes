@@ -1,6 +1,6 @@
 #![cfg(all(feature = "mmap", feature = "zerocopy"))]
 
-use anybytes::area::ByteArea;
+use anybytes::area::{ByteArea, Section};
 use proptest::prelude::*;
 
 fn align_up(val: usize, align: usize) -> usize {
@@ -213,4 +213,76 @@ fn allocated_section_claims_its_blocks() {
     let metadata = file.metadata().expect("metadata");
     assert_eq!(metadata.len(), LEN as u64);
     assert!(metadata.blocks() * 512 >= LEN as u64, "allocated range is backed by blocks");
+}
+
+#[test]
+fn anonymous_section_is_zeroed_writable_and_freezes() {
+    let mut section = Section::<u32>::anonymous_allocated(3).expect("anonymous section");
+    assert_eq!(section.as_ref(), &[0, 0, 0]);
+    section.as_mut_slice().copy_from_slice(&[7, 8, 9]);
+    let handle = section.handle();
+    let bytes = section.freeze().expect("freeze");
+
+    let mut expected = Vec::new();
+    for value in [7u32, 8, 9] {
+        expected.extend_from_slice(&value.to_ne_bytes());
+    }
+    assert_eq!(bytes.as_ref(), expected.as_slice());
+    assert_eq!(handle.view(&bytes).expect("view").as_ref(), &[7, 8, 9]);
+}
+
+#[test]
+fn anonymous_section_moves_across_threads() {
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<Section<'static, u8>>();
+
+    let mut section = Section::<u8>::anonymous_allocated(4).expect("anonymous section");
+    section.copy_from_slice(&[1, 2, 3, 4]);
+    let bytes = std::thread::spawn(move || section.freeze().expect("freeze"))
+        .join()
+        .expect("thread");
+    assert_eq!(bytes.as_ref(), &[1, 2, 3, 4]);
+}
+
+/// The mapping is backed by a file that has no name.
+#[cfg(target_os = "linux")]
+#[test]
+fn anonymous_section_is_unlinked() {
+    const LEN: usize = 1 << 20;
+    let section = Section::<u8>::anonymous_allocated(LEN).expect("anonymous section");
+    let at = section.as_ptr() as usize;
+    let maps = std::fs::read_to_string("/proc/self/maps").expect("maps");
+    let line = maps
+        .lines()
+        .find(|line| {
+            let range = line.split(' ').next().unwrap();
+            let (start, end) = range.split_once('-').unwrap();
+            let start = usize::from_str_radix(start, 16).unwrap();
+            let end = usize::from_str_radix(end, 16).unwrap();
+            start <= at && at < end
+        })
+        .expect("the section is mapped");
+    assert!(line.ends_with("(deleted)"), "backing file has a name: {line}");
+}
+
+/// A file that cannot grow is an error from the constructor, not a fault
+/// later. Runs itself again in a child with a small file size limit and
+/// SIGXFSZ ignored, so the zero write fails with `EFBIG`.
+#[cfg(target_os = "linux")]
+#[test]
+fn anonymous_section_reports_storage_it_cannot_claim() {
+    const CHILD: &str = "ANYBYTES_AREA_FSIZE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let error = Section::<u8>::anonymous_allocated(1 << 20).expect_err("over the limit");
+        assert_eq!(error.raw_os_error(), Some(27), "EFBIG: {error}");
+        return;
+    }
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#"trap "" XFSZ; ulimit -f 64 && exec "$0" --exact anonymous_section_reports_storage_it_cannot_claim --test-threads 1"#)
+        .arg(std::env::current_exe().expect("test binary"))
+        .env(CHILD, "1")
+        .status()
+        .expect("child");
+    assert!(status.success(), "child: {status}");
 }
