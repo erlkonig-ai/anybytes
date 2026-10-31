@@ -164,18 +164,29 @@ impl<'area> SectionWriter<'area> {
         let file = &mut self.area.file;
         if allocate {
             // Write the new range so its blocks exist before it is mapped.
-            file.as_file_mut()
-                .seek(SeekFrom::Start(self.area.len as u64))?;
-            let zeros = [0u8; 64 * 1024];
-            let mut remaining = end - self.area.len;
-            while remaining > 0 {
-                let chunk = remaining.min(zeros.len());
-                file.as_file_mut().write_all(&zeros[..chunk])?;
-                remaining -= chunk;
+            let old = self.area.len;
+            let written = (|| {
+                file.as_file_mut().seek(SeekFrom::Start(old as u64))?;
+                let zeros = [0u8; 64 * 1024];
+                let mut remaining = end - old;
+                while remaining > 0 {
+                    let chunk = remaining.min(zeros.len());
+                    file.as_file_mut().write_all(&zeros[..chunk])?;
+                    remaining -= chunk;
+                }
+                Ok::<(), io::Error>(())
+            })();
+            if let Err(error) = written {
+                // A partial write may have extended the file; cut it back so
+                // the area's length and the file agree again (best effort:
+                // the next reservation sets the length exactly anyway).
+                let _ = file.as_file_mut().set_len(old as u64);
+                return Err(error);
             }
-        } else {
-            file.as_file_mut().set_len(end as u64)?;
         }
+        // Set the exact length on both paths, which also removes any tail a
+        // failed earlier reservation left beyond the area's length.
+        file.as_file_mut().set_len(end as u64)?;
         // Ensure subsequent mappings see the extended size.
         file.as_file_mut().seek(SeekFrom::Start(end as u64))?;
         let mmap = unsafe {
