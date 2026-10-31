@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add `SectionWriter::reserve_allocated`, which writes a new section's range
+  before mapping it, so a full filesystem is an `io::Error` at reservation
+  instead of a SIGBUS on a later store into a sparse hole. `reserve` keeps
+  growing the file sparsely and is unchanged for incremental builders; its
+  documentation now names that behaviour.
+
 ## 0.20.3 - 2026-10-01
 
 - Release the byte-owner and area implementation pinned by the TribleSpace

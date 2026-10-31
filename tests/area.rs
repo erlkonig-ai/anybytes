@@ -158,3 +158,59 @@ fn persisted_area_observes_frozen_section() {
     drop(file);
     assert_eq!(bytes.as_ref(), &[5, 6, 7, 8]);
 }
+
+#[test]
+fn allocated_sections_lay_out_like_sparse_ones() {
+    let mut sparse = ByteArea::new().expect("area");
+    let mut allocated = ByteArea::new().expect("area");
+    {
+        let mut s = sparse.sections();
+        let mut a = allocated.sections();
+        let mut s1 = s.reserve::<u8>(3).expect("reserve");
+        let mut a1 = a.reserve_allocated::<u8>(3).expect("reserve");
+        s1.copy_from_slice(&[1, 2, 3]);
+        a1.copy_from_slice(&[1, 2, 3]);
+        let mut s2 = s.reserve::<u64>(2).expect("reserve");
+        let mut a2 = a.reserve::<u64>(2).expect("reserve");
+        s2.as_mut_slice().copy_from_slice(&[7, 8]);
+        a2.as_mut_slice().copy_from_slice(&[7, 8]);
+        let s3 = s.reserve::<u32>(5).expect("reserve");
+        let a3 = a.reserve_allocated::<u32>(5).expect("reserve");
+        assert!(a3.as_ref().iter().all(|&byte| byte == 0));
+        drop((s1, a1, s2, a2, s3, a3));
+    }
+    let sparse = sparse.freeze().expect("freeze");
+    let allocated = allocated.freeze().expect("freeze");
+    assert_eq!(sparse.as_ref(), allocated.as_ref());
+}
+
+#[test]
+fn frozen_allocated_section_outlives_temporary_area() {
+    let bytes = {
+        let mut area = ByteArea::new().expect("area");
+        let mut sections = area.sections();
+        let mut section = sections.reserve_allocated::<u8>(4).expect("reserve");
+        section.copy_from_slice(&[4, 3, 2, 1]);
+        section.freeze().expect("freeze")
+    };
+    assert_eq!(bytes.as_ref(), &[4, 3, 2, 1]);
+}
+
+#[cfg(unix)]
+#[test]
+fn allocated_section_claims_its_blocks() {
+    use std::os::unix::fs::MetadataExt;
+    const LEN: usize = 1 << 20;
+    let directory = tempfile::tempdir().expect("temp directory");
+    let path = directory.path().join("allocated.bin");
+    let mut area = ByteArea::new().expect("area");
+    {
+        let mut sections = area.sections();
+        let section = sections.reserve_allocated::<u8>(LEN).expect("reserve");
+        drop(section);
+    }
+    let file = area.persist(&path).expect("persist");
+    let metadata = file.metadata().expect("metadata");
+    assert_eq!(metadata.len(), LEN as u64);
+    assert!(metadata.blocks() * 512 >= LEN as u64, "allocated range is backed by blocks");
+}

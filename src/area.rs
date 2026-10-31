@@ -48,7 +48,7 @@
 //! # }
 //! ```
 
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 
 use memmap2;
@@ -118,7 +118,36 @@ pub struct SectionWriter<'area> {
 
 impl<'area> SectionWriter<'area> {
     /// Reserve a new section inside the area.
+    ///
+    /// The file grows by `set_len`, so the new range may be sparse: storage
+    /// is only claimed when the mapping is first written. If the filesystem
+    /// is full at that point, the write faults (SIGBUS on Unix) instead of
+    /// returning an error. Use [`SectionWriter::reserve_allocated`] where
+    /// that must surface as an [`io::Error`] here instead.
     pub fn reserve<T>(&mut self, elems: usize) -> io::Result<Section<'area, T>>
+    where
+        T: FromBytes + Immutable,
+    {
+        self.reserve_with(elems, false)
+    }
+
+    /// Reserve a new section whose storage is claimed now.
+    ///
+    /// Like [`SectionWriter::reserve`], but the new range (including any
+    /// alignment padding) is written with zeros before it is mapped, so a
+    /// full filesystem is reported as an [`io::Error`] by this call rather
+    /// than as a fault on a later store into a hole. The section reads as
+    /// zeros either way; this costs one write of its length. On
+    /// copy-on-write filesystems a later store can still need fresh blocks,
+    /// so this narrows the failure window rather than closing it everywhere.
+    pub fn reserve_allocated<T>(&mut self, elems: usize) -> io::Result<Section<'area, T>>
+    where
+        T: FromBytes + Immutable,
+    {
+        self.reserve_with(elems, true)
+    }
+
+    fn reserve_with<T>(&mut self, elems: usize, allocate: bool) -> io::Result<Section<'area, T>>
     where
         T: FromBytes + Immutable,
     {
@@ -133,7 +162,20 @@ impl<'area> SectionWriter<'area> {
         let map_len = end - aligned_offset;
 
         let file = &mut self.area.file;
-        file.as_file_mut().set_len(end as u64)?;
+        if allocate {
+            // Write the new range so its blocks exist before it is mapped.
+            file.as_file_mut()
+                .seek(SeekFrom::Start(self.area.len as u64))?;
+            let zeros = [0u8; 64 * 1024];
+            let mut remaining = end - self.area.len;
+            while remaining > 0 {
+                let chunk = remaining.min(zeros.len());
+                file.as_file_mut().write_all(&zeros[..chunk])?;
+                remaining -= chunk;
+            }
+        } else {
+            file.as_file_mut().set_len(end as u64)?;
+        }
         // Ensure subsequent mappings see the extended size.
         file.as_file_mut().seek(SeekFrom::Start(end as u64))?;
         let mmap = unsafe {
