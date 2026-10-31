@@ -63,9 +63,25 @@ use zerocopy::{FromBytes, Immutable};
 #[cfg(feature = "zerocopy")]
 use crate::view::{View, ViewError};
 
-/// Alignment helper.
-fn align_up(val: usize, align: usize) -> usize {
-    (val + align - 1) & !(align - 1)
+/// The byte length of `elems` values of `T`, or an error when it does not fit
+/// in `usize`: a wrapped length would map less than the section's slice spans.
+///
+/// Also refuses a `T` aligned more strictly than a page: a mapping starts on
+/// a page boundary and nothing stronger, so such a slice could be misaligned.
+fn byte_len<T>(elems: usize) -> io::Result<usize> {
+    if core::mem::align_of::<T>() > page_size::get() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "section element alignment exceeds the page size",
+        ));
+    }
+    core::mem::size_of::<T>()
+        .checked_mul(elems)
+        .ok_or_else(too_large)
+}
+
+fn too_large() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, "section size overflows usize")
 }
 
 /// Area managing a temporary file.
@@ -153,9 +169,14 @@ impl<'area> SectionWriter<'area> {
     {
         let page = page_size::get();
         let align = core::mem::align_of::<T>();
-        let len_bytes = core::mem::size_of::<T>() * elems;
-        let start = align_up(self.area.len, align);
-        let end = start + len_bytes;
+        let len_bytes = byte_len::<T>(elems)?;
+        let start = self
+            .area
+            .len
+            .checked_add(align - 1)
+            .map(|padded| padded & !(align - 1))
+            .ok_or_else(too_large)?;
+        let end = start.checked_add(len_bytes).ok_or_else(too_large)?;
 
         let aligned_offset = start & !(page - 1);
         let offset = start - aligned_offset;
@@ -255,7 +276,7 @@ where
     /// into [`Bytes`] as for any section, and its [`Section::handle`]
     /// addresses those frozen bytes.
     pub fn anonymous_allocated(elems: usize) -> io::Result<Self> {
-        let len = core::mem::size_of::<T>() * elems;
+        let len = byte_len::<T>(elems)?;
         let mut file = tempfile::tempfile()?;
         extend(&mut file, 0, len, true)?;
         // SAFETY: the file has no name and this is its only descriptor,

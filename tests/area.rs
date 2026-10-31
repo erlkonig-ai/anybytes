@@ -286,3 +286,30 @@ fn anonymous_section_reports_storage_it_cannot_claim() {
         .expect("child");
     assert!(status.success(), "child: {status}");
 }
+
+#[test]
+fn section_sizes_that_overflow_are_refused() {
+    let huge = usize::MAX / 2 + 2;
+    let error = anybytes::area::Section::<u16>::anonymous_allocated(huge).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let mut area = ByteArea::new().expect("area");
+    let mut sections = area.sections();
+    let error = sections.reserve::<u64>(usize::MAX).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let error = sections.reserve_allocated::<u16>(huge).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[repr(C, align(1048576))]
+#[derive(zerocopy::FromBytes, zerocopy::Immutable)]
+struct OverAligned([u8; 1 << 20]);
+
+#[test]
+fn elements_aligned_beyond_a_page_are_refused() {
+    let error = Section::<OverAligned>::anonymous_allocated(1).err().expect("refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let mut area = ByteArea::new().expect("area");
+    let mut sections = area.sections();
+    let error = sections.reserve::<OverAligned>(1).err().expect("refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
