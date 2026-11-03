@@ -170,9 +170,12 @@ impl ByteArea {
     /// The handle is read-only because frozen [`Bytes`] from this area map
     /// the same file: writing through a handle would change memory under
     /// views that were already validated, and for a type with invalid bit
-    /// patterns that yields an invalid value in safe code. Other handles to
-    /// the path, opened elsewhere, stay outside this guarantee, as they do
-    /// for [`Bytes::map_file`].
+    /// patterns that yields an invalid value in safe code. This closes only
+    /// the route through the returned handle. The persisted path is an
+    /// ordinary file: any process that opens it writable can still change the
+    /// bytes under frozen views. Unlike the unsafe [`Bytes::map_file`], where
+    /// that is the caller's obligation, `persist` is safe, so this is a
+    /// limitation of the area, not a promise that its backing is immutable.
     ///
     /// All mapped writes are synchronized once before the temporary file is
     /// retained. The rename itself and its parent directory are not separately

@@ -702,9 +702,6 @@ fn frozen_area_mappings_cannot_be_recovered_as_mmap() {
         .try_unwrap_owner::<memmap2::Mmap>()
         .expect_err("area mapping recovered as Mmap");
     assert!(whole.downcast_to_owner::<memmap2::Mmap>().is_err());
-    assert!(frozen
-        .clone()
-        .try_unwrap_owner::<memmap2::Mmap>()
-        .is_err());
+    assert!(frozen.clone().try_unwrap_owner::<memmap2::Mmap>().is_err());
     assert_eq!(view[0].get(), 1);
 }
