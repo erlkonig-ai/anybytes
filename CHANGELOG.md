@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `ByteArea::persist` now returns a read-only `File`. Frozen `Bytes` from the
+  area map the same file, so a writable handle could change memory under
+  views already validated, which for a type with invalid bit patterns is an
+  invalid value in safe code. On Unix the reopened handle is checked to be the
+  persisted file by device and inode.
+
 - Split `Section`'s capabilities by what the element type allows, so a type
   whose all-zero bit pattern is invalid (one holding a `NonZero`, say) can be
   a section. Reserving (`reserve`, `reserve_allocated`,

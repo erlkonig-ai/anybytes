@@ -159,6 +159,30 @@ fn persisted_area_observes_frozen_section() {
     assert_eq!(bytes.as_ref(), &[5, 6, 7, 8]);
 }
 
+/// The handle `persist` returns cannot write the file that frozen views
+/// map: a write through it fails, and a NonZero value validated before
+/// persisting still reads back unchanged.
+#[test]
+fn persisted_area_handle_cannot_change_validated_views() {
+    use std::io::Write;
+
+    let directory = tempfile::tempdir().expect("temp directory");
+    let path = directory.path().join("area.bin");
+
+    let mut area = ByteArea::new().expect("area");
+    let mut sections = area.sections();
+    let mut section = sections.reserve::<NonZeroPair>(1).expect("reserve");
+    section.write(0, &pair(7, 9));
+    let bytes = section.freeze().expect("freeze");
+    drop(sections);
+    let view = bytes.clone().view::<[NonZeroPair]>().expect("valid view");
+
+    let mut file = area.persist(&path).expect("persist");
+    assert!(file.write_all(&[0u8; 32]).is_err(), "persist handle wrote");
+    assert_eq!(view[0].a.get(), 7);
+    assert_eq!(view[0].b.get(), 9);
+}
+
 #[test]
 fn allocated_sections_lay_out_like_sparse_ones() {
     let mut sparse = ByteArea::new().expect("area");

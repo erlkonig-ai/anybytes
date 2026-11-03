@@ -142,17 +142,41 @@ impl ByteArea {
         Ok(Bytes::from_source(mmap))
     }
 
-    /// Persist the temporary area file to `path` and return the underlying [`std::fs::File`].
+    /// Persist the temporary area file to `path` and return a read-only
+    /// [`std::fs::File`] for it.
+    ///
+    /// The handle is read-only because frozen [`Bytes`] from this area map
+    /// the same file: writing through a handle would change memory under
+    /// views that were already validated, and for a type with invalid bit
+    /// patterns that yields an invalid value in safe code. Other handles to
+    /// the path, opened elsewhere, stay outside this guarantee, as they do
+    /// for [`Bytes::map_file`].
     ///
     /// All mapped writes are synchronized once before the temporary file is
     /// retained. The rename itself and its parent directory are not separately
     /// synchronized, so this does not promise crash-atomic path publication.
+    /// On Unix the reopened handle is checked to be the persisted file (same
+    /// device and inode), so a path replaced in between is an error rather
+    /// than a handle to another file.
     ///
     /// The persistence contract is supported on Unix targets. Other targets
     /// are best-effort rather than part of AnyBytes' support surface.
     pub fn persist<P: AsRef<std::path::Path>>(self, path: P) -> io::Result<std::fs::File> {
+        let path = path.as_ref();
         self.file.as_file().sync_all()?;
-        self.file.persist(path).map_err(Into::into)
+        let written = self.file.persist(path).map_err(io::Error::from)?;
+        let read_only = std::fs::File::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let (persisted, reopened) = (written.metadata()?, read_only.metadata()?);
+            if (persisted.dev(), persisted.ino()) != (reopened.dev(), reopened.ino()) {
+                return Err(io::Error::other(
+                    "persisted area file was replaced before it could be reopened read-only",
+                ));
+            }
+        }
+        Ok(read_only)
     }
 }
 
