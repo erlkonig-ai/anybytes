@@ -13,7 +13,8 @@
   need `T: FromBytes + Immutable`, because unwritten slots hold zeros. Such a
   type is read back after `freeze` through `Bytes::view` or
   `SectionHandle::view`, which validate every slot, so an unwritten slot is
-  a view error rather than an invalid value. `Section::freeze`,
+  a view error rather than an invalid value wherever zero is not a valid
+  `T`. `Section::freeze`,
   `Section::handle` and `SectionHandle::bytes` now carry no bound, and
   `SectionHandle::view` needs `T: TryFromBytes + Immutable`. Every bound
   only relaxes, so existing `FromBytes` callers are unaffected.

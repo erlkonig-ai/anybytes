@@ -38,8 +38,11 @@
 //! A type with invalid bit patterns, such as one holding a
 //! [`NonZero`](core::num::NonZero), is therefore read back only after
 //! freezing, through [`Bytes::view`] or [`SectionHandle::view`], which
-//! validate every slot. A slot that was never written still holds zeros, so
-//! the view fails rather than producing an invalid value.
+//! validate every slot. A slot that was never written still holds zeros:
+//! where zero is not a valid `T` the view fails rather than producing an
+//! invalid value, and where it is (a `bool`, an enum with a zero
+//! discriminant) the slot reads back as that value, as it would for a
+//! `FromBytes` type.
 //!
 //! # Examples
 //!

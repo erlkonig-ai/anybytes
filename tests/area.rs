@@ -322,7 +322,7 @@ fn elements_aligned_beyond_a_page_are_refused() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
-/// A 64-byte-style record whose all-zero bit pattern is invalid: it can be
+/// A 32-byte record whose all-zero bit pattern is invalid: it can be
 /// written and validated, but never handed out as `&[T]` over a zero fill.
 #[repr(C, align(16))]
 #[derive(
