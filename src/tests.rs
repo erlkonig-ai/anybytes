@@ -674,3 +674,37 @@ fn test_anybytes_into_burn_bytes_preserves_sliced_view() {
     assert_eq!(any_again.as_ref(), [12u8, 13, 14].as_ref());
     assert_eq!(any_again.as_ref().as_ptr(), slice_ptr);
 }
+
+/// The mappings behind frozen area and section `Bytes` cannot be recovered
+/// as a `memmap2::Mmap`, so they cannot be made writable while a validated
+/// view of the same file is alive. Before, `area.freeze()` gave a second,
+/// independent mapping whose owner could be unwrapped and `make_mut`ed,
+/// turning a validated `NonZeroU8` into zero in safe code.
+#[cfg(all(feature = "mmap", feature = "zerocopy"))]
+#[test]
+fn frozen_area_mappings_cannot_be_recovered_as_mmap() {
+    use crate::area::ByteArea;
+    use core::num::NonZeroU8;
+
+    let mut area = ByteArea::new().expect("area");
+    let mut sections = area.sections();
+    let mut section = sections.reserve::<u8>(1).expect("reserve");
+    section.as_mut_slice()[0] = 1;
+    let frozen = section.freeze().expect("freeze section");
+    drop(sections);
+    let view = frozen
+        .clone()
+        .view::<[NonZeroU8]>()
+        .expect("valid non-zero view");
+
+    let whole = area.freeze().expect("freeze area");
+    let whole = whole
+        .try_unwrap_owner::<memmap2::Mmap>()
+        .expect_err("area mapping recovered as Mmap");
+    assert!(whole.downcast_to_owner::<memmap2::Mmap>().is_err());
+    assert!(frozen
+        .clone()
+        .try_unwrap_owner::<memmap2::Mmap>()
+        .is_err());
+    assert_eq!(view[0].get(), 1);
+}

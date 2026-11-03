@@ -85,7 +85,29 @@ use memmap2;
 use page_size;
 use tempfile::NamedTempFile;
 
-use crate::Bytes;
+use crate::{ByteSource, Bytes};
+
+/// The owner of a frozen area or section mapping. It is private, so no caller
+/// can name it to recover the mapping from its [`Bytes`]
+/// (`Bytes::try_unwrap_owner`, `Bytes::downcast_to_owner`) and make it
+/// writable with `memmap2::Mmap::make_mut` while views of the same file,
+/// already validated, are alive.
+struct FrozenMap(memmap2::Mmap);
+
+// SAFETY: the bytes are the mapping's, which stay at the same address and
+// unchanged by this owner for as long as it lives; the owner is the value
+// itself.
+unsafe impl ByteSource for FrozenMap {
+    type Owner = Self;
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+
+    fn get_owner(self) -> Self::Owner {
+        self
+    }
+}
 
 #[cfg(feature = "zerocopy")]
 use zerocopy::{FromBytes, Immutable, IntoBytes, TryFromBytes};
@@ -139,7 +161,7 @@ impl ByteArea {
     pub fn freeze(self) -> io::Result<Bytes> {
         let file = self.file.into_file();
         let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
-        Ok(Bytes::from_source(mmap))
+        Ok(Bytes::from_source(FrozenMap(mmap)))
     }
 
     /// Persist the temporary area file to `path` and return a read-only
@@ -473,7 +495,7 @@ impl<'arena, T> Section<'arena, T> {
         // its dirty pages and its backing object, so visibility and lifetime
         // do not require a durability flush here.
         let map = self.mmap.make_read_only()?;
-        Ok(Bytes::from_source(map).slice(offset..offset + len_bytes))
+        Ok(Bytes::from_source(FrozenMap(map)).slice(offset..offset + len_bytes))
     }
 
     /// Return a handle that can reconstruct this section from a frozen [`ByteArea`].

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Frozen area and section `Bytes` keep their mapping behind a private owner
+  type, so `Bytes::try_unwrap_owner` and `Bytes::downcast_to_owner` can no
+  longer recover it as a `memmap2::Mmap`. Before, `ByteArea::freeze` made a
+  second, independent mapping whose owner could be unwrapped and made
+  writable with `make_mut` while a validated view of the same file was alive.
+
 - `ByteArea::persist` now returns a read-only `File`. Frozen `Bytes` from the
   area map the same file, so a writable handle could change memory under
   views already validated, which for a type with invalid bit patterns is an
