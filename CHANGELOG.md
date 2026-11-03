@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Split `Section`'s capabilities by what the element type allows, so a type
+  whose all-zero bit pattern is invalid (one holding a `NonZero`, say) can be
+  a section. Reserving (`reserve`, `reserve_allocated`,
+  `Section::anonymous_allocated`) now needs `T: TryFromBytes + Immutable`
+  instead of `T: FromBytes + Immutable`. The new `Section::write`,
+  `Section::write_slice` and `Section::as_mut_bytes` copy valid values into
+  slots as bytes and need `T: IntoBytes + Immutable`. Typed references to
+  the slots (`as_mut_slice`, `Deref`, `DerefMut`, `AsRef`, `AsMut`) still
+  need `T: FromBytes + Immutable`, because unwritten slots hold zeros. Such a
+  type is read back after `freeze` through `Bytes::view` or
+  `SectionHandle::view`, which validate every slot, so an unwritten slot is
+  a view error rather than an invalid value. `Section::freeze`,
+  `Section::handle` and `SectionHandle::bytes` now carry no bound, and
+  `SectionHandle::view` needs `T: TryFromBytes + Immutable`. Every bound
+  only relaxes, so existing `FromBytes` callers are unaffected.
 - Add `SectionWriter::reserve_allocated`, which writes a new section's range
   before mapping it, so a full filesystem is an `io::Error` at reservation
   instead of a SIGBUS on a later store into a sparse hole. `reserve` keeps

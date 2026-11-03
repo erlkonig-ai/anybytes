@@ -20,6 +20,27 @@
 //! [`Section::anonymous_allocated`] creates one owned section, with the same
 //! allocation guarantee, that borrows no area.
 //!
+//! # Element types
+//!
+//! A section starts zero-filled and does not track which slots have been
+//! written, so its capabilities depend on what the element type `T` allows:
+//!
+//! - Any `T: TryFromBytes + Immutable` can be reserved and frozen. The
+//!   section is aligned for `T`.
+//! - With `T: IntoBytes`, valid values are copied into slots by
+//!   [`Section::write`] and [`Section::write_slice`], and
+//!   [`Section::as_mut_bytes`] exposes the slots as raw bytes.
+//! - Only with `T: FromBytes`, where every bit pattern (the zero fill
+//!   included) is a valid `T`, does the section hand out `&[T]` and
+//!   `&mut [T]`: [`Section::as_mut_slice`], `Deref`, `DerefMut`, `AsRef` and
+//!   `AsMut`.
+//!
+//! A type with invalid bit patterns, such as one holding a
+//! [`NonZero`](core::num::NonZero), is therefore read back only after
+//! freezing, through [`Bytes::view`] or [`SectionHandle::view`], which
+//! validate every slot. A slot that was never written still holds zeros, so
+//! the view fails rather than producing an invalid value.
+//!
 //! # Examples
 //!
 //! ```
@@ -64,7 +85,7 @@ use tempfile::NamedTempFile;
 use crate::Bytes;
 
 #[cfg(feature = "zerocopy")]
-use zerocopy::{FromBytes, Immutable};
+use zerocopy::{FromBytes, Immutable, IntoBytes, TryFromBytes};
 
 #[cfg(feature = "zerocopy")]
 use crate::view::{View, ViewError};
@@ -148,7 +169,7 @@ impl<'area> SectionWriter<'area> {
     /// that must surface as an [`io::Error`] here instead.
     pub fn reserve<T>(&mut self, elems: usize) -> io::Result<Section<'area, T>>
     where
-        T: FromBytes + Immutable,
+        T: TryFromBytes + Immutable,
     {
         self.reserve_with(elems, false)
     }
@@ -164,14 +185,14 @@ impl<'area> SectionWriter<'area> {
     /// so this narrows the failure window rather than closing it everywhere.
     pub fn reserve_allocated<T>(&mut self, elems: usize) -> io::Result<Section<'area, T>>
     where
-        T: FromBytes + Immutable,
+        T: TryFromBytes + Immutable,
     {
         self.reserve_with(elems, true)
     }
 
     fn reserve_with<T>(&mut self, elems: usize, allocate: bool) -> io::Result<Section<'area, T>>
     where
-        T: FromBytes + Immutable,
+        T: TryFromBytes + Immutable,
     {
         let page = page_size::get();
         let align = core::mem::align_of::<T>();
@@ -244,6 +265,55 @@ fn extend(file: &mut std::fs::File, old: usize, end: usize, allocate: bool) -> i
 }
 
 /// Mutable section reserved from a [`ByteArea`].
+///
+/// What a section offers depends on its element type; see the
+/// [module documentation](self#element-types). Typed references to the slots
+/// need `T: FromBytes`. A type with invalid bit patterns is written by value
+/// and read back, validated, after [`Section::freeze`]:
+///
+/// ```
+/// use core::num::NonZero;
+/// use anybytes::area::Section;
+/// use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
+///
+/// #[derive(TryFromBytes, IntoBytes, KnownLayout, Immutable, Debug, PartialEq)]
+/// #[repr(C)]
+/// struct Id(NonZero<u64>);
+///
+/// let mut section = Section::<Id>::anonymous_allocated(2).unwrap();
+/// section.write(0, &Id(NonZero::new(1).unwrap()));
+/// section.write(1, &Id(NonZero::new(2).unwrap()));
+/// let bytes = section.freeze().unwrap();
+/// let ids = bytes.view::<[Id]>().unwrap();
+/// assert_eq!(ids[1], Id(NonZero::new(2).unwrap()));
+/// ```
+///
+/// Such a section hands out no `&mut [T]`, because its unwritten slots are
+/// zeros and zeros are not a valid `Id`:
+///
+/// ```compile_fail,E0599
+/// # use core::num::NonZero;
+/// # use anybytes::area::Section;
+/// # use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
+/// # #[derive(TryFromBytes, IntoBytes, KnownLayout, Immutable)]
+/// # #[repr(C)]
+/// # struct Id(NonZero<u64>);
+/// let mut section = Section::<Id>::anonymous_allocated(1).unwrap();
+/// let ids: &mut [Id] = section.as_mut_slice();
+/// ```
+///
+/// nor, through `Deref`, any `&[T]`:
+///
+/// ```compile_fail,E0608
+/// # use core::num::NonZero;
+/// # use anybytes::area::Section;
+/// # use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
+/// # #[derive(TryFromBytes, IntoBytes, KnownLayout, Immutable)]
+/// # #[repr(C)]
+/// # struct Id(NonZero<u64>);
+/// let section = Section::<Id>::anonymous_allocated(1).unwrap();
+/// let id = &section[0];
+/// ```
 #[derive(Debug)]
 pub struct Section<'arena, T> {
     /// Writable mapping for the current allocation.
@@ -266,7 +336,7 @@ unsafe impl<T: Sync> Sync for Section<'_, T> {}
 
 impl<T> Section<'static, T>
 where
-    T: FromBytes + Immutable,
+    T: TryFromBytes + Immutable,
 {
     /// Create a section in its own anonymous temporary file, with its storage
     /// claimed now.
@@ -303,13 +373,66 @@ where
     T: FromBytes + Immutable,
 {
     /// Access the backing slice.
+    ///
+    /// Requires `T: FromBytes`, since unwritten slots hold zeros. For other
+    /// element types, write values with [`Section::write`] or
+    /// [`Section::write_slice`].
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe {
             let ptr = self.mmap.as_mut_ptr().add(self.offset) as *mut T;
             core::slice::from_raw_parts_mut(ptr, self.elems)
         }
     }
+}
 
+impl<'arena, T> Section<'arena, T>
+where
+    T: IntoBytes + Immutable,
+{
+    /// The section's slots as raw bytes, `size_of::<T>()` bytes per slot.
+    ///
+    /// Bytes stored here are only ever read back as bytes, or as `T` through
+    /// a validating view after [`Section::freeze`] (or as `&[T]` when
+    /// `T: FromBytes`, where any bytes are a valid `T`).
+    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
+        let len_bytes = self.elems * core::mem::size_of::<T>();
+        &mut self.mmap[self.offset..self.offset + len_bytes]
+    }
+
+    /// Copy `value` into slot `index`.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is not less than the section's number of elements.
+    pub fn write(&mut self, index: usize, value: &T) {
+        self.write_slice(index, core::slice::from_ref(value));
+    }
+
+    /// Copy `values` into the slots starting at `start`.
+    ///
+    /// # Panics
+    ///
+    /// If the slots `start..start + values.len()` do not all lie within the
+    /// section.
+    pub fn write_slice(&mut self, start: usize, values: &[T]) {
+        let elems = self.elems;
+        let end = start
+            .checked_add(values.len())
+            .filter(|&end| end <= elems)
+            .unwrap_or_else(|| {
+                panic!(
+                    "writing {} elements at slot {start} overruns a section of {elems}",
+                    values.len()
+                )
+            });
+        // `end <= elems`, and `elems * size_of::<T>()` fits in `usize`
+        // (checked at reservation), so neither product overflows.
+        let size = core::mem::size_of::<T>();
+        self.as_mut_bytes()[start * size..end * size].copy_from_slice(values.as_bytes());
+    }
+}
+
+impl<'arena, T> Section<'arena, T> {
     /// Freeze the section and return immutable [`Bytes`].
     ///
     /// Freezing changes the mapping's memory protection without synchronizing
@@ -396,16 +519,22 @@ pub struct SectionHandle<T> {
     _type: PhantomData<T>,
 }
 
-impl<T> SectionHandle<T>
-where
-    T: FromBytes + Immutable,
-{
+impl<T> SectionHandle<T> {
     /// Extract the raw bytes for this section from `area`.
     pub fn bytes<'a>(&self, area: &'a Bytes) -> Bytes {
         area.slice(self.offset..self.offset + self.len)
     }
+}
 
+impl<T> SectionHandle<T>
+where
+    T: TryFromBytes + Immutable,
+{
     /// Interpret the section as a typed [`View`].
+    ///
+    /// Every element is validated, so this fails for a section with a slot
+    /// that does not hold a valid `T`, such as an unwritten slot of a type
+    /// whose all-zero bit pattern is invalid.
     pub fn view(&self, area: &Bytes) -> Result<View<[T]>, ViewError> {
         self.bytes(area).view::<[T]>()
     }

@@ -212,7 +212,10 @@ fn allocated_section_claims_its_blocks() {
     let file = area.persist(&path).expect("persist");
     let metadata = file.metadata().expect("metadata");
     assert_eq!(metadata.len(), LEN as u64);
-    assert!(metadata.blocks() * 512 >= LEN as u64, "allocated range is backed by blocks");
+    assert!(
+        metadata.blocks() * 512 >= LEN as u64,
+        "allocated range is backed by blocks"
+    );
 }
 
 #[test]
@@ -262,7 +265,10 @@ fn anonymous_section_is_unlinked() {
             start <= at && at < end
         })
         .expect("the section is mapped");
-    assert!(line.ends_with("(deleted)"), "backing file has a name: {line}");
+    assert!(
+        line.ends_with("(deleted)"),
+        "backing file has a name: {line}"
+    );
 }
 
 /// A file that cannot grow is an error from the constructor, not a fault
@@ -306,10 +312,122 @@ struct OverAligned([u8; 1 << 20]);
 
 #[test]
 fn elements_aligned_beyond_a_page_are_refused() {
-    let error = Section::<OverAligned>::anonymous_allocated(1).err().expect("refused");
+    let error = Section::<OverAligned>::anonymous_allocated(1)
+        .err()
+        .expect("refused");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     let mut area = ByteArea::new().expect("area");
     let mut sections = area.sections();
     let error = sections.reserve::<OverAligned>(1).err().expect("refused");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+/// A 64-byte-style record whose all-zero bit pattern is invalid: it can be
+/// written and validated, but never handed out as `&[T]` over a zero fill.
+#[repr(C, align(16))]
+#[derive(
+    zerocopy::TryFromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+    Debug,
+    PartialEq,
+)]
+struct NonZeroPair {
+    a: core::num::NonZero<u128>,
+    b: core::num::NonZero<u128>,
+}
+
+fn pair(a: u128, b: u128) -> NonZeroPair {
+    NonZeroPair {
+        a: core::num::NonZero::new(a).unwrap(),
+        b: core::num::NonZero::new(b).unwrap(),
+    }
+}
+
+#[test]
+fn non_zero_sections_are_written_by_value_and_viewed_after_freeze() {
+    let mut area = ByteArea::new().expect("area");
+    let mut sections = area.sections();
+
+    // A one-byte section first, so the pairs need alignment padding.
+    let mut prefix = sections.reserve::<u8>(1).expect("reserve u8");
+    prefix.write(0, &9);
+    prefix.freeze().expect("freeze prefix");
+
+    let mut section = sections.reserve::<NonZeroPair>(3).expect("reserve pairs");
+    section.write(0, &pair(1, 2));
+    section.write_slice(1, &[pair(3, 4), pair(u128::MAX, 5)]);
+    let handle = section.handle();
+    assert_eq!(handle.offset % core::mem::align_of::<NonZeroPair>(), 0);
+    let bytes = section.freeze().expect("freeze");
+    let expected = [pair(1, 2), pair(3, 4), pair(u128::MAX, 5)];
+    assert_eq!(&*bytes.view::<[NonZeroPair]>().expect("view"), &expected);
+
+    let mut allocated = sections
+        .reserve_allocated::<NonZeroPair>(1)
+        .expect("reserve allocated");
+    allocated
+        .as_mut_bytes()
+        .copy_from_slice(zerocopy::IntoBytes::as_bytes(&pair(6, 7)));
+    let allocated_handle = allocated.handle();
+    allocated.freeze().expect("freeze allocated");
+
+    drop(sections);
+    let all = area.freeze().expect("freeze area");
+    assert_eq!(&*handle.view(&all).expect("handle view"), &expected);
+    assert_eq!(
+        &*allocated_handle.view(&all).expect("allocated view"),
+        &[pair(6, 7)]
+    );
+
+    let mut anonymous = Section::<NonZeroPair>::anonymous_allocated(2).expect("anonymous section");
+    anonymous.write_slice(0, &[pair(8, 9), pair(10, 11)]);
+    let bytes = anonymous.freeze().expect("freeze anonymous");
+    assert_eq!(
+        &*bytes.view::<[NonZeroPair]>().expect("anonymous view"),
+        &[pair(8, 9), pair(10, 11)]
+    );
+}
+
+#[test]
+fn unwritten_non_zero_slot_fails_validation() {
+    let mut area = ByteArea::new().expect("area");
+    let mut sections = area.sections();
+    let mut section = sections.reserve::<NonZeroPair>(2).expect("reserve");
+    section.write(0, &pair(1, 2));
+    let handle = section.handle();
+    let bytes = section.freeze().expect("freeze");
+    assert!(bytes.view::<[NonZeroPair]>().is_err());
+    drop(sections);
+    let all = area.freeze().expect("freeze area");
+    assert!(handle.view(&all).is_err());
+
+    let section = Section::<NonZeroPair>::anonymous_allocated(1).expect("anonymous");
+    let bytes = section.freeze().expect("freeze anonymous");
+    assert!(bytes.view::<[NonZeroPair]>().is_err());
+}
+
+#[test]
+fn from_bytes_sections_take_writes_by_value_too() {
+    let mut section = Section::<u32>::anonymous_allocated(3).expect("anonymous section");
+    section.write(2, &9);
+    section.write_slice(0, &[7, 8]);
+    assert_eq!(section.as_ref(), &[7, 8, 9]);
+    section.as_mut_bytes()[..4].copy_from_slice(&1u32.to_ne_bytes());
+    assert_eq!(&*section, &[1, 8, 9]);
+}
+
+#[test]
+#[should_panic(expected = "overruns a section of 2")]
+fn writes_past_the_end_panic() {
+    let mut section = Section::<u16>::anonymous_allocated(2).expect("anonymous section");
+    section.write_slice(1, &[1, 2]);
+}
+
+#[test]
+#[should_panic(expected = "overruns a section of 2")]
+fn writes_at_an_overflowing_slot_panic() {
+    let mut section = Section::<u16>::anonymous_allocated(2).expect("anonymous section");
+    section.write(usize::MAX, &1);
 }
